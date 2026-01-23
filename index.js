@@ -187,10 +187,17 @@ async function getLimits(bearerToken, deviceId, proxy = null, retryCount = 0) {
     }
     const response = await axios.get('https://api.asksurf.ai/muninn/v1/chat/sessions/limits', config);
     const limitsData = response.data.data;
+    const featureToMode = {
+      'V2_INSTANCE': 'ASK',
+      'V2_THINKING': 'RESEARCH'
+    };
     spinner.succeed(chalk.green(` ┊ ✓ Limits Fetched Successfully`));
     await sleep(500);
     return limitsData.remain_items.reduce((acc, item) => {
-      acc[item.feature] = item.remain;
+      const mode = featureToMode[item.feature];
+      if (mode) {
+        acc[mode] = item.remain;
+      }
       return acc;
     }, {});
   } catch (err) {
@@ -215,7 +222,8 @@ async function getLimits(bearerToken, deviceId, proxy = null, retryCount = 0) {
 async function performChat(bearerToken, deviceId, mode, prompt, proxy = null) {
   const sessionId = uuidv4();
   const requestId = uuidv4().replace(/-/g, '').slice(0, 20); 
-  const wsUrl = `wss://api.asksurf.ai/muninn/v3/chat/sessions/${sessionId}/ws?token=${bearerToken}&lang=en&session_type=${mode}&platform=WEB`;
+  const sessionType = mode === 'ASK' ? 'V2_INSTANCE' : 'V2_THINKING';
+  const wsUrl = `wss://api.asksurf.ai/muninn/v3/chat/sessions/${sessionId}/ws?token=${bearerToken}&lang=en&session_type=${sessionType}&platform=WEB`;
 
   await clearConsoleLine();
   const spinner = ora({ text: chalk.cyan(` ┊ → Starting Chat in ${mode} mode`), prefixText: '', spinner: 'bouncingBar', interval: 120 }).start();
@@ -281,14 +289,19 @@ async function processAccount(account, proxy, prompts, noType) {
       console.log(chalk.white(` ┊ │ Limit RESEARCH: ${limits.RESEARCH || 0}`));
       console.log(chalk.yellow(' ┊ └──'));
 
-      let availableModes = [];
-      if (limits.ASK > 0) availableModes.push('ASK');
-      if (limits.RESEARCH > 0) availableModes.push('RESEARCH');
-
       const maxChats = (limits.ASK || 0) + (limits.RESEARCH || 0);
       let chatCount = 0;
       console.log(chalk.magentaBright(' ┊ ┌── Proses Chat ──'));
-      while (availableModes.length > 0 && prompts.length > 0) {
+      while (chatCount < maxChats && prompts.length > 0) {
+        // Check limits before each chat
+        limits = await getLimits(bearer, deviceId, proxy);
+        console.log(chalk.white(` ┊ │ Remaining ASK: ${limits.ASK || 0}`));
+        console.log(chalk.white(` ┊ │ Remaining RESEARCH: ${limits.RESEARCH || 0}`));
+        let availableModes = [];
+        if (limits.ASK > 0) availableModes.push('ASK');
+        if (limits.RESEARCH > 0) availableModes.push('RESEARCH');
+        if (availableModes.length === 0) break;
+
         chatCount++;
         console.log(chalk.yellow(` ┊ ├─ Chat ${createProgressBar(chatCount, maxChats)} ──`));
         const mode = availableModes[crypto.randomInt(0, availableModes.length)];
@@ -300,11 +313,10 @@ async function processAccount(account, proxy, prompts, noType) {
 
         try {
           await performChat(bearer, deviceId, mode, prompt, proxy);
-          limits[mode]--;
-          if (limits[mode] <= 0) {
-            availableModes = availableModes.filter(m => m !== mode);
+          if (chatCount < maxChats) {
+            const delay = Math.floor(Math.random() * (15000 - 10000 + 1)) + 10000;
+            await sleep(delay);
           }
-          await sleep(8000); 
         } catch (err) {
           if (err.message === 'Token expired') {
             const refreshedTokens = await refreshToken(refresh_token, proxy);
@@ -317,11 +329,6 @@ async function processAccount(account, proxy, prompts, noType) {
           console.log(chalk.red(` ┊ ✗ Chat failed: ${err.message}`));
           chatCount--;
         }
-
-        limits = await getLimits(bearer, deviceId, proxy);
-        availableModes = [];
-        if (limits.ASK > 0) availableModes.push('ASK');
-        if (limits.RESEARCH > 0) availableModes.push('RESEARCH');
       }
       console.log(chalk.magentaBright(' ┊ └──'));
 
